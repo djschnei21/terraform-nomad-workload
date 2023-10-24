@@ -5,6 +5,7 @@ variables {
   stack_id = "test-stack"
   tfc_organization = "test-org"
   region = "us-west-2"
+  app_image = "huggingface/mongoku:latest"
 }
 
 run "variable_validation" {
