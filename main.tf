@@ -191,7 +191,7 @@ job "demo-frontend" {
         service {
             name = "demo-frontend"
             port = "http"
-            address = "${attr.unique.platform.aws.public-ipv4}"
+            address = ""${attr.unique.platform.aws.public-ipv4}""
 
             connect {
                 sidecar_service {
