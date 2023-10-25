@@ -1,2 +1,2 @@
 # terraform-nomad-workload
-![Diagram](./diagram.png)
+![](./diagram.png | width=250)
