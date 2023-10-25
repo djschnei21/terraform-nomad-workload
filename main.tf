@@ -80,7 +80,58 @@ provider "nomad" {
 }
 
 resource "nomad_job" "mongodb" {
-  jobspec = file("${path.module}/nomad-jobs/mongodb.hcl")
+  hcl2 {
+    vars = {
+      image = var.mongodb_image
+      stack_id = var.stack_id
+    }
+  }
+  jobspec = <<EOT
+variable "image" {
+  type = string
+}
+variable "stack_id" {
+  type = string
+}
+job "${var.stack_id}-mongodb" {
+    datacenters = ["dc1"]
+    node_pool = "arm"
+    type = "service"
+
+    group "${var.stack_id}-mongodb" {
+        network {
+            mode = "bridge"
+            port "http" {
+                static = 27017
+                to     = 27017
+            }
+        }
+
+        service {
+            name = "${var.stack_id}-mongodb"
+            port = "27017"
+            address = "$${attr.unique.platform.aws.public-ipv4}"
+
+            connect{
+                sidecar_service {}
+            }
+        } 
+
+        task "${var.stack_id}-mongodb" {
+            driver = "docker"
+
+            config {
+                image = var.image
+            }
+            env {
+                # This will immedietely be rotated be Vault
+                MONGO_INITDB_ROOT_USERNAME = "admin"
+                MONGO_INITDB_ROOT_PASSWORD = "password"
+            }
+        }
+    }
+}
+EOT
 }
 
 resource "null_resource" "wait_for_db" {
@@ -93,7 +144,7 @@ resource "null_resource" "wait_for_db" {
 
 data "consul_service" "mongo_service" {
     depends_on = [ null_resource.wait_for_db ]
-    name = "demo-mongodb"
+    name = "${var.stack_id}-mongodb"
 }
 
 resource "vault_database_secrets_mount" "mongodb" {
@@ -105,10 +156,10 @@ resource "vault_database_secrets_mount" "mongodb" {
       mongodb[0].password
     ]
   }
-  path = "mongodb"
+  path = "${var.stack_id}-mongodb"
 
   mongodb {
-    name                 = "mongodb-on-nomad"
+    name                 = "${var.stack_id}-mongodb"
     username             = "admin"
     password             = "password"
     connection_url       = "mongodb://{{username}}:{{password}}@${[for s in data.consul_service.mongo_service.service : s.address][0]}:27017/admin?tls=false"
@@ -124,7 +175,7 @@ resource "null_resource" "mongodb_root_rotation" {
     vault_database_secrets_mount.mongodb
   ]
   provisioner "local-exec" {
-    command = "curl --header \"X-Vault-Token: ${data.terraform_remote_state.hcp_clusters.outputs.vault_root_token}\" --request POST ${data.terraform_remote_state.hcp_clusters.outputs.vault_public_endpoint}/v1/${vault_database_secrets_mount.mongodb.path}/rotate-root/mongodb-on-nomad"
+    command = "curl --header \"X-Vault-Token: ${data.terraform_remote_state.hcp_clusters.outputs.vault_root_token}\" --request POST ${data.terraform_remote_state.hcp_clusters.outputs.vault_public_endpoint}/v1/${vault_database_secrets_mount.mongodb.path}/rotate-root/${var.stack_id}-mongodb"
   }
 }
 
@@ -143,19 +194,23 @@ resource "nomad_job" "frontend" {
   ]
   hcl2 {
     vars = {
-      app_image = var.app_image
+      image = var.frontend_app_image
+      stack_id = var.stack_id
     }
   }
   jobspec = <<EOT
-variable "app_image" {
+variable "image" {
   type = string
 }
-job "demo-frontend" {
+variable "stack_id" {
+  type = string
+}
+job "${var.stack_id}-frontend" {
     datacenters = ["dc1"]
     node_pool = "x86"
     type = "service"
     
-    group "frontend" {
+    group "${var.stack_id}-frontend" {
         network {
             mode = "bridge"
 
@@ -165,7 +220,7 @@ job "demo-frontend" {
             }
         }
         service {
-            name = "demo-frontend"
+            name = "${var.stack_id}-frontend"
             port = "http"
             address = "$${attr.unique.platform.aws.public-ipv4}"
 
@@ -173,14 +228,14 @@ job "demo-frontend" {
                 sidecar_service {
                     proxy {
                         upstreams {
-                            destination_name = "demo-mongodb"
+                            destination_name = "${var.stack_id}-mongodb"
                             local_bind_port  = 27017
                         }
                     }
                 }
             }
         }
-        task "frontend" {
+        task "${var.stack_id}-frontend" {
             driver = "docker"
             vault {
                 policies = ["nomad"]
@@ -188,17 +243,30 @@ job "demo-frontend" {
             }
             template {
                 data = <<EOH
-MONGOKU_DEFAULT_HOST={{ with secret "mongodb/creds/demo" }}{{ .Data.username }}:{{ .Data.password }}{{ end }}@127.0.0.1:27017
+MONGOKU_DEFAULT_HOST={{ with secret "${var.stack_id}-mongodb/creds/demo" }}{{ .Data.username }}:{{ .Data.password }}{{ end }}@127.0.0.1:27017
 EOH
                 destination = "secrets/mongoku.env"
                 env         = true
             }
 
             config {
-                image = var.app_image
+                image = var.image
             }
         }
     }
 } 
 EOT
 }
+
+data "consul_service" "frontend_service" {
+    depends_on = [ nomad_job.frontend ]
+    name = "${var.stack_id}-frontend"
+}
+
+resource "consul_intention" "example" {
+  count = var.create_consul_intention ? 1 : 0
+
+  source_name      = data.consul_service.frontend_service.name
+  destination_name = data.consul_service.mongo_service.name
+  action           = "allow"
+} 
